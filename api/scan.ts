@@ -9,8 +9,12 @@ async function getTwitchToken(): Promise<string> {
     `https://id.twitch.tv/oauth2/token?client_id=${TWITCH_CLIENT_ID}&client_secret=${TWITCH_CLIENT_SECRET}&grant_type=client_credentials`,
     { method: "POST" }
   );
-  if (!res.ok) throw new Error(`Twitch OAuth failed: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Twitch OAuth failed (${res.status}): ${body}`);
+  }
   const data = await res.json();
+  if (!data.access_token) throw new Error("Twitch OAuth response missing access_token");
   return data.access_token;
 }
 
@@ -21,32 +25,64 @@ async function twitchGet(path: string, token: string) {
       Authorization: `Bearer ${token}`,
     },
   });
-  if (!res.ok) throw new Error(`Twitch API error: ${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Twitch API error on /${path.split("?")[0]} (${res.status}): ${body}`);
+  }
   return res.json();
 }
 
+// channels/followers requires moderator:read:followers scope (user token) since Aug 2023.
+// With app access tokens it returns 401 — so we catch it and fall back to 0.
+async function safeFollowerCount(broadcasterId: string, token: string): Promise<number> {
+  try {
+    const res = await fetch(
+      `https://api.twitch.tv/helix/channels/followers?broadcaster_id=${broadcasterId}&first=1`,
+      {
+        headers: {
+          "Client-ID": TWITCH_CLIENT_ID,
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+    if (!res.ok) return 0;
+    const data = await res.json();
+    return data.total ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 function computeMetrics(viewerCount: number, followerCount: number) {
-  // Deterministic heuristics based on real API data
-  const chatRatio = viewerCount > 0 ? Math.min(100, Math.round((1 / Math.log10(viewerCount + 2)) * 100)) : 50;
-  const followerViewerRatio = followerCount > 0 ? Math.min(100, Math.round((viewerCount / followerCount) * 100 * 10)) : 50;
+  const chatRatio = viewerCount > 0
+    ? Math.min(100, Math.round((1 / Math.log10(viewerCount + 2)) * 100))
+    : 50;
+  const followerViewerRatio = followerCount > 0
+    ? Math.min(100, Math.round((viewerCount / followerCount) * 1000))
+    : 50;
   return {
     viewerChatRatio: chatRatio,
     followerViewerRatio: Math.min(100, followerViewerRatio),
     chatVelocity: Math.min(100, Math.round(viewerCount / 10)),
-    accountAge: 60,          // cannot determine without chatter list scrape
+    accountAge: 60,
     engagementScore: chatRatio,
     suspiciousPatterns: followerViewerRatio > 80 ? 70 : 30,
   };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
+  res.setHeader("Cache-Control", "no-store");
 
-  const channelName = (req.query.channel as string ?? "").trim().toLowerCase();
-  if (!channelName) return res.status(400).json({ error: "Missing channel parameter" });
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
+  const channelName = ((req.query.channel as string) ?? "").trim().toLowerCase();
+  if (!channelName) {
+    return res.status(400).json({ error: "Missing channel parameter" });
+  }
   if (!TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET) {
-    return res.status(500).json({ error: "Twitch API credentials not configured on server" });
+    return res.status(500).json({ error: "TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET not set in environment" });
   }
 
   try {
@@ -58,15 +94,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     ]);
 
     const user = userRes.data?.[0];
-    if (!user) return res.status(404).json({ error: `Channel "${channelName}" not found` });
+    if (!user) {
+      return res.status(404).json({ error: `Channel "${channelName}" not found on Twitch` });
+    }
 
     const stream = streamRes.data?.[0] ?? null;
-    const followRes = await twitchGet(`channels/followers?broadcaster_id=${user.id}&first=1`, token);
+    const followerCount = await safeFollowerCount(user.id, token);
 
     const viewerCount: number = stream?.viewer_count ?? 0;
-    const followerCount: number = followRes.total ?? 0;
     const metrics = computeMetrics(viewerCount, followerCount);
-
     const suspiciousAccounts = Math.round(viewerCount * (metrics.suspiciousPatterns / 100) * 0.4);
 
     const riskScore = Math.round(
@@ -114,7 +150,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         severity: "warning",
         description: "Viewer count spikes inconsistent with follower base growth patterns.",
         detected: metrics.followerViewerRatio < 30,
-        value: followerCount > 0 ? `${(viewerCount / followerCount * 100).toFixed(1)}% ratio` : "N/A",
+        value: followerCount > 0
+          ? `${(viewerCount / followerCount * 100).toFixed(1)}% ratio`
+          : "Follower data unavailable",
       },
       {
         id: "uniform-chat-timing",
@@ -150,13 +188,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       },
     ];
 
-    let aiAnalysis = `Analysis of ${channelName}: Risk score ${riskScore}/100 (${riskLevel}). ${
-      stream ? `Currently live with ${viewerCount.toLocaleString()} viewers` : "Channel is offline"
-    }. Follower count: ${followerCount.toLocaleString()}.`;
+    let aiAnalysis =
+      `${channelName} — risk score ${riskScore}/100 (${riskLevel}). ` +
+      (stream
+        ? `Currently live with ${viewerCount.toLocaleString()} viewers playing ${stream.game_name}.`
+        : "Channel is currently offline.") +
+      (followerCount > 0 ? ` Follower count: ${followerCount.toLocaleString()}.` : "");
 
     if (GROQ_KEY) {
       try {
-        const prompt = `You are a Twitch viewbot detection expert. Analyze this channel for bot activity:\n\nChannel: ${channelName}\nLive: ${!!stream}\nViewers: ${viewerCount}\nFollowers: ${followerCount}\nGame: ${stream?.game_name ?? "offline"}\nRisk Score: ${riskScore}/100\nRisk Level: ${riskLevel}\nDetected Indicators: ${indicators.filter((i) => i.detected).map((i) => i.name).join(", ")}\n\nProvide a concise 2-3 sentence professional analysis of the likelihood of viewbot usage and what the data suggests. Be specific and reference the numbers.`;
+        const prompt =
+          `You are a Twitch viewbot detection expert. Analyze this channel for bot activity:\n\n` +
+          `Channel: ${channelName}\n` +
+          `Live: ${!!stream}\n` +
+          `Viewers: ${viewerCount}\n` +
+          (followerCount > 0 ? `Followers: ${followerCount}\n` : "") +
+          `Game: ${stream?.game_name ?? "offline"}\n` +
+          `Risk Score: ${riskScore}/100\n` +
+          `Risk Level: ${riskLevel}\n` +
+          `Detected Indicators: ${indicators.filter((i) => i.detected).map((i) => i.name).join(", ") || "None"}\n\n` +
+          `Provide a concise 2-3 sentence professional analysis of the likelihood of viewbot usage. Be specific and reference the numbers.`;
 
         const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
@@ -173,14 +224,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         });
         if (groqRes.ok) {
           const groqData = await groqRes.json();
-          aiAnalysis = groqData.choices?.[0]?.message?.content ?? aiAnalysis;
+          const content = groqData.choices?.[0]?.message?.content;
+          if (content) aiAnalysis = content;
         }
       } catch {
         // fall through to default analysis
       }
     }
 
-    const result = {
+    return res.status(200).json({
       channelName,
       displayName: user.display_name,
       avatarUrl: user.profile_image_url,
@@ -195,16 +247,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       chatRatio: metrics.viewerChatRatio,
       suspiciousAccounts,
       accountsAnalyzed: viewerCount,
-      scanDuration: 0, // will be set by client
+      scanDuration: 0,
       timestamp: new Date().toISOString(),
       aiAnalysis,
       metrics,
-    };
-
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(result);
+    });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unexpected error";
+    const message = err instanceof Error ? err.message : "Unexpected server error";
+    console.error("[scan] error:", message);
     return res.status(500).json({ error: message });
   }
 }

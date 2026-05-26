@@ -5,7 +5,7 @@ Built with React + Vite, deployed on Vercel, powered by **Groq** (free AI API).
 
 ---
 
-## ⚡ Setup in 10 minutes
+## Setup in 10 minutes
 
 ### 1. Get your FREE Groq API key
 1. Go to https://console.groq.com
@@ -45,7 +45,7 @@ Open http://localhost:5173
 
 ---
 
-## 🚀 Deploy to Vercel
+##  Deploy to Vercel
 
 ### Option A — Vercel CLI (fastest)
 ```bash
@@ -77,7 +77,7 @@ In your Vercel project dashboard:
 
 ---
 
-## 💰 Cost
+##  Cost
 
 | Service | Free Tier | Limit |
 |---------|-----------|-------|

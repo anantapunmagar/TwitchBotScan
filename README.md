@@ -1,4 +1,4 @@
-# TwitchBotScanner 🔍
+# TwitchBotScanner 
 
 View-bot detection & stream authenticity analyzer.
 Built with React + Vite, deployed on Vercel, powered by **Groq** (free AI API).
@@ -89,7 +89,7 @@ In your Vercel project dashboard:
 
 ---
 
-## 🔧 Tech Stack
+##  Tech Stack
 - **Frontend**: React + Vite
 - **Backend**: Vercel Serverless Functions
 - **AI**: Groq (llama-3.3-70b-versatile) — free

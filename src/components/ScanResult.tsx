@@ -51,7 +51,7 @@ export default function ScanResultComponent({ result, onRescan }: ScanResultProp
   const grad = riskGradient(result.riskLevel);
 
   const handleCopy = () => {
-    const text = `TwitchScanPro Report: ${result.displayName}\nRisk Score: ${result.riskScore}/100 (${result.riskLevel.toUpperCase()})\nViewers: ${result.viewerCount.toLocaleString()} | Followers: ${result.followerCount.toLocaleString()}\nSuspicious Accounts: ${result.suspiciousAccounts.toLocaleString()}\n\n${result.aiAnalysis}`;
+    const text = `TwitchBotScan Report: ${result.displayName}\nRisk Score: ${result.riskScore}/100 (${result.riskLevel.toUpperCase()})\nViewers: ${result.viewerCount.toLocaleString()} | Followers: ${result.followerCount.toLocaleString()}\nSuspicious Accounts: ${result.suspiciousAccounts.toLocaleString()}\n\n${result.aiAnalysis}`;
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);

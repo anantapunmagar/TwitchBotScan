@@ -5,7 +5,7 @@ export async function scanChannel(channelName: string): Promise<ScanResult> {
 
   let res: Response;
   try {
-    res = await fetch(`/api/scan?channel=${encodeURIComponent(channelName.trim().toLowerCase())}`);
+    res = await fetch(`/api/analyze?channel=${encodeURIComponent(channelName.trim().toLowerCase())}`);
   } catch (networkErr) {
     throw new Error("Could not reach the server. Check your connection and try again.");
   }

@@ -142,7 +142,7 @@ export default function App() {
                     <Shield className="w-5 h-5 text-white" />
                   </div>
                   <span className="text-white font-black text-2xl tracking-tight">
-                    Twitch<span className="text-purple-400">Scan</span>
+                    TwitchBot<span className="text-purple-400">Scan</span>
                   </span>
                 </div>
 
@@ -241,7 +241,7 @@ export default function App() {
 
       <footer className="relative z-10 border-t border-white/5 mt-16">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <span className="text-purple-500 font-bold text-sm">TwitchScan</span>
+          <span className="text-purple-500 font-bold text-sm">TwitchBotScan</span>
           <div className="flex items-center gap-4 text-gray-700 text-xs">
             <span>Powered by Groq AI</span>
             <span>·</span>

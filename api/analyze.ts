@@ -38,7 +38,7 @@ interface UsernamePatternResult {
 
 interface ScanResult {
   channelName: string; displayName: string; isLive: boolean;
-  viewerCount: number; followerCount: number; chatterCount: number;
+  viewerCount: number; followerCount: number | null; chatterCount: number;
   subCount: number | null; accountAgeDays: number | null;
   riskScore: number; riskLevel: RiskLevel; signals: SignalResult[];
   aiSummary: string; scanTime: string; dataSource: "live" | "offline_estimate";
@@ -101,9 +101,9 @@ function findKnownBots(chatters: string[]): string[] {
   return chatters.filter(c => { const l = c.toLowerCase(); return KNOWN_VIEW_BOTS.has(l) && !UTILITY_BOTS.has(l); });
 }
 
-function calculateRatios(viewerCount: number, followerCount: number, chatterCount: number, subCount: number | null): RatioMetrics {
+function calculateRatios(viewerCount: number, followerCount: number | null, chatterCount: number, subCount: number | null): RatioMetrics {
   const chatterToCCV = viewerCount > 0 ? chatterCount / viewerCount : null;
-  const followerToCCV = viewerCount > 0 ? followerCount / viewerCount : null;
+  const followerToCCV = (viewerCount > 0 && followerCount !== null) ? followerCount / viewerCount : null;
   const subToCCV = (viewerCount > 0 && subCount !== null) ? subCount / viewerCount : null;
   let engagementScore = 50;
   if (chatterToCCV !== null) {
@@ -127,7 +127,7 @@ function calculateRatios(viewerCount: number, followerCount: number, chatterCoun
 }
 
 function generateSignals(p: {
-  viewerCount: number; followerCount: number; chatterCount: number;
+  viewerCount: number; followerCount: number | null; chatterCount: number;
   subCount: number | null; accountAgeDays: number | null; broadcasterType: string;
   knownBots: string[]; usernamePatterns: UsernamePatternResult;
   ratios: RatioMetrics; isLive: boolean; hasChatterData: boolean;
@@ -160,7 +160,7 @@ function generateSignals(p: {
     const ratio = ratios.followerToCCV;
     let score = 0, flagged = false, value = "N/A";
     if (ratio !== null && viewerCount > 0) {
-      value = `${followerCount.toLocaleString()} followers / ${viewerCount.toLocaleString()} viewers = ${ratio.toFixed(2)}x`;
+      value = `${(followerCount ?? 0).toLocaleString()} followers / ${viewerCount.toLocaleString()} viewers = ${ratio.toFixed(2)}x`;
       if (ratio < 0.5) { score = 90; flagged = true; }
       else if (ratio < 1.0) { score = 75; flagged = true; }
       else if (ratio < 2.0) { score = 45; flagged = true; }
@@ -272,7 +272,7 @@ function generateSummary(p: { channelName: string; riskScore: number; riskLevel:
     else summary += "This is within the *organic* range.\n\n";
   }
   if (ratios.followerToCCV !== null && viewerCount > 0) {
-    summary += `👥 **Follower ratio:** ${followerCount.toLocaleString()} followers vs ${viewerCount.toLocaleString()} viewers = **${ratios.followerToCCV.toFixed(2)}x**. `;
+    summary += `👥 **Follower ratio:** ${(followerCount ?? 0).toLocaleString()} followers vs ${viewerCount.toLocaleString()} viewers = **${ratios.followerToCCV.toFixed(2)}x**. `;
     if (ratios.followerToCCV < 1) summary += "More viewers than followers is a critical red flag.\n\n";
     else if (ratios.followerToCCV < 3) summary += "Low relative to typical organic channels.\n\n";
     else summary += "Healthy ratio.\n\n";
@@ -311,13 +311,19 @@ async function twitchGet(path: string, token: string) {
   return res.json();
 }
 
-async function safeFollowerCount(broadcasterId: string, token: string): Promise<number> {
+// Returns null (not 0) when the call fails — distinguishes "data unavailable"
+// from "genuinely 0 followers". The /channels/followers endpoint requires
+// moderator:read:followers scope (user token) since Aug 2023, so app tokens
+// get a 401. Returning 0 caused every channel to be flagged as critical.
+async function safeFollowerCount(broadcasterId: string, token: string): Promise<number | null> {
   try {
     const res = await fetch(`https://api.twitch.tv/helix/channels/followers?broadcaster_id=${broadcasterId}&first=1`, { headers: { "Client-ID": TWITCH_CLIENT_ID, Authorization: `Bearer ${token}` } });
-    if (!res.ok) return 0;
+    if (!res.ok) return null;
     const data = await res.json();
-    return data.total ?? 0;
-  } catch { return 0; }
+    const total = data.total;
+    // If total is 0 but the field exists, it's genuinely 0. If missing, treat as unavailable.
+    return typeof total === "number" ? total : null;
+  } catch { return null; }
 }
 
 // TMI chatters endpoint — public, no auth needed.
@@ -382,12 +388,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const riskLevel = scoreToRiskLevel(riskScore);
     const confidence = calculateConfidence({ isLive, hasChatterData, hasSubData: false, hasAccountAge: accountAgeDays !== null, viewerCount });
 
-    let aiSummary = generateSummary({ channelName: user.display_name, riskScore, riskLevel, signals, ratios, isLive, viewerCount, followerCount, chatterCount });
+    let aiSummary = generateSummary({ channelName: user.display_name, riskScore, riskLevel, signals, ratios, isLive, viewerCount, followerCount: followerCount ?? 0, chatterCount });
 
     if (GROQ_KEY) {
       try {
         const flaggedSignals = signals.filter(s => s.flagged);
-        const prompt = `You are a Twitch viewbot detection expert. Provide a concise, honest 2-3 sentence analysis.\n\nChannel: ${user.display_name} (${channelName})\nBroadcaster type: ${user.broadcaster_type || "unaffiliated"}\nAccount age: ${accountAgeDays ?? "unknown"} days\nLive: ${isLive}\nViewers: ${viewerCount}\nFollowers: ${followerCount > 0 ? followerCount.toLocaleString() : "unavailable"}\nChatters: ${hasChatterData ? chatterCount : "unavailable"}\n${ratios.chatterToCCV !== null ? `Chatter ratio: ${(ratios.chatterToCCV * 100).toFixed(1)}% (organic baseline ~16.7%, botted ~5.6%)\n` : ""}${ratios.followerToCCV !== null ? `Follower/viewer ratio: ${ratios.followerToCCV.toFixed(2)}x\n` : ""}Risk score: ${riskScore}/100 (${riskLevel})\nFlagged signals (${flaggedSignals.length}/8): ${flaggedSignals.map(s => s.label).join(", ") || "none"}\n\nOnly reference the signals listed above. Do NOT claim access to IP data or data not listed. Be honest about limitations.`;
+        const prompt = `You are a Twitch viewbot detection expert. Provide a concise, honest 2-3 sentence analysis.\n\nChannel: ${user.display_name} (${channelName})\nBroadcaster type: ${user.broadcaster_type || "unaffiliated"}\nAccount age: ${accountAgeDays ?? "unknown"} days\nLive: ${isLive}\nViewers: ${viewerCount}\nFollowers: ${followerCount !== null && followerCount > 0 ? followerCount.toLocaleString() : "unavailable"}\nChatters: ${hasChatterData ? chatterCount : "unavailable"}\n${ratios.chatterToCCV !== null ? `Chatter ratio: ${(ratios.chatterToCCV * 100).toFixed(1)}% (organic baseline ~16.7%, botted ~5.6%)\n` : ""}${ratios.followerToCCV !== null ? `Follower/viewer ratio: ${ratios.followerToCCV.toFixed(2)}x\n` : ""}Risk score: ${riskScore}/100 (${riskLevel})\nFlagged signals (${flaggedSignals.length}/8): ${flaggedSignals.map(s => s.label).join(", ") || "none"}\n\nOnly reference the signals listed above. Do NOT claim access to IP data or data not listed. Be honest about limitations.`;
         const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_KEY}` }, body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: prompt }], max_tokens: 300, temperature: 0.2 }) });
         if (groqRes.ok) { const groqData = await groqRes.json(); const content = groqData.choices?.[0]?.message?.content; if (content) aiSummary = content; }
       } catch { /* fall through to algorithmic summary */ }
@@ -395,7 +401,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const result: ScanResult = {
       channelName, displayName: user.display_name, isLive,
-      viewerCount: isLive ? viewerCount : 0, followerCount, chatterCount,
+      viewerCount: isLive ? viewerCount : 0, followerCount: followerCount ?? 0, chatterCount,
       subCount: null, accountAgeDays, riskScore, riskLevel, signals, aiSummary,
       scanTime: new Date().toISOString(), dataSource: isLive ? "live" : "offline_estimate",
       knownBots, usernamePatterns, ratios, confidence,
